@@ -1,0 +1,24 @@
+Company Return Policy
+
+Our company offers a 30-day return policy for all unused products in their original packaging. 
+Items that have been opened or used may be eligible for a partial refund or store credit, 
+depending on the condition of the item upon return.
+
+To initiate a return, customers must:
+1. Contact customer service at returns@example.com
+2. Provide the order number and reason for return
+3. Receive a return authorization number
+4. Ship the item back within 7 days of receiving the return authorization
+
+Shipping costs for returns are the responsibility of the customer unless the return is due 
+to a defect or error on our part. Refunds will be processed within 5-7 business days after 
+the returned item is received and inspected.
+
+Special conditions:
+- Seasonal items have a 14-day return window
+- Electronics must be returned within 15 days
+- Custom or personalized items cannot be returned
+- Sale items marked "Final Sale" cannot be returned
+
+For exchanges, customers should follow the same process as returns. If the exchanged item 
+has a different price, the difference will be charged or refunded accordingly.

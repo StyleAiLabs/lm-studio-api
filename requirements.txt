@@ -2,3 +2,11 @@ fastapi==0.104.1
 uvicorn==0.23.2
 requests==2.31.0
 python-dotenv==1.0.0
+langchain==0.0.292
+langchain-community==0.0.8
+chromadb==0.4.18
+sentence-transformers==2.2.2
+pandas==2.1.0
+pypdf==3.16.2
+docx2txt==0.8
+pydantic==2.4.2
