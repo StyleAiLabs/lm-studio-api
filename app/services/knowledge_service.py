@@ -25,8 +25,7 @@ class KnowledgeBase:
         self.chunk_overlap = chunk_overlap
         
         # Configure logging
-        logging.basicConfig(level=logging.INFO, 
-                           format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        self.logger = logging.getLogger(__name__)
         
         # Create directories if they don't exist
         os.makedirs(self.documents_dir, exist_ok=True)
@@ -45,13 +44,13 @@ class KnowledgeBase:
                 name="business_knowledge",
                 embedding_function=self.embedding_function
             )
-            logging.info(f"Loaded existing collection with {self.collection.count()} documents")
+            self.logger.info(f"Loaded existing collection with {self.collection.count()} documents")
         except ValueError:
             self.collection = self.client.create_collection(
                 name="business_knowledge",
                 embedding_function=self.embedding_function
             )
-            logging.info("Created new collection")
+            self.logger.info("Created new collection")
     
     def _extract_text_from_file(self, file_path: str) -> Optional[str]:
         """Extract text from various file types."""
@@ -74,11 +73,11 @@ class KnowledgeBase:
                 return docx2txt.process(file_path)
             
             else:
-                logging.warning(f"Unsupported file type: {ext}")
+                self.logger.warning(f"Unsupported file type: {ext}")
                 return None
         
         except Exception as e:
-            logging.error(f"Error extracting text from {file_path}: {str(e)}")
+            self.logger.error(f"Error extracting text from {file_path}: {str(e)}")
             return None
     
     def _chunk_text(self, text: str, source: str) -> List[Dict[str, Any]]:
@@ -125,7 +124,7 @@ class KnowledgeBase:
                 "source": source
             })
         
-        logging.info(f"Split document into {len(chunks)} chunks")
+        self.logger.info(f"Split document into {len(chunks)} chunks")
         return chunks
     
     def add_document(self, file_path: str) -> bool:
@@ -134,13 +133,13 @@ class KnowledgeBase:
             text = self._extract_text_from_file(file_path)
             
             if not text:
-                logging.warning(f"Could not extract text from {file_path}")
+                self.logger.warning(f"Could not extract text from {file_path}")
                 return False
             
             chunks = self._chunk_text(text, file_path)
             
             if not chunks:
-                logging.warning(f"No chunks created from {file_path}")
+                self.logger.warning(f"No chunks created from {file_path}")
                 return False
             
             # Prepare data for Chroma
@@ -155,11 +154,11 @@ class KnowledgeBase:
                 metadatas=metadatas
             )
             
-            logging.info(f"Added {len(chunks)} chunks from {file_path} to knowledge base")
+            self.logger.info(f"Added {len(chunks)} chunks from {file_path} to knowledge base")
             return True
         
         except Exception as e:
-            logging.error(f"Error adding document {file_path}: {str(e)}")
+            self.logger.error(f"Error adding document {file_path}: {str(e)}")
             return False
     
     def rebuild_knowledge_base(self) -> bool:
@@ -168,9 +167,9 @@ class KnowledgeBase:
             # Reset collection
             try:
                 self.client.delete_collection("business_knowledge")
-                logging.info("Deleted existing collection")
+                self.logger.info("Deleted existing collection")
             except ValueError:
-                logging.info("No existing collection to delete")
+                self.logger.info("No existing collection to delete")
                 
             self.collection = self.client.create_collection(
                 name="business_knowledge",
@@ -180,18 +179,18 @@ class KnowledgeBase:
             # Add all documents
             success = True
             documents = list_documents(self.documents_dir)
-            logging.info(f"Found {len(documents)} documents to process")
+            self.logger.info(f"Found {len(documents)} documents to process")
             
             for file in documents:
                 file_path = os.path.join(self.documents_dir, file)
                 if not self.add_document(file_path):
-                    logging.warning(f"Failed to process {file}")
+                    self.logger.warning(f"Failed to process {file}")
                     success = False
             
             return success
         
         except Exception as e:
-            logging.error(f"Error rebuilding knowledge base: {str(e)}")
+            self.logger.error(f"Error rebuilding knowledge base: {str(e)}")
             return False
     
     def query(self, query_text: str, k: int = 3) -> Tuple[List[str], List[str]]:
@@ -202,46 +201,53 @@ class KnowledgeBase:
             Tuple of (content_list, source_list)
         """
         try:
-            # Try to ensure we get results
+            # Try to ensure we get results - REMOVING include_distances
+            self.logger.info(f"Querying knowledge base with: '{query_text}'")
             results = self.collection.query(
                 query_texts=[query_text],
-                n_results=k,
-                include_distances=True
+                n_results=k
             )
-            
-            logging.info(f"Query: '{query_text}'")
             
             # Check if we have results
             if results and 'documents' in results and results['documents'] and results['documents'][0]:
                 documents = results['documents'][0]  # First query result
-                metadatas = results['metadatas'][0]  # First query result
-                distances = results['distances'][0] if 'distances' in results else None
                 
-                # Log distances if available
-                if distances:
-                    for i, (doc, dist) in enumerate(zip(documents, distances)):
-                        logging.info(f"Match {i+1} (distance={dist:.4f}): {doc[:50]}...")
+                # Check if metadatas exists in results
+                if 'metadatas' in results and results['metadatas'] and results['metadatas'][0]:
+                    metadatas = results['metadatas'][0]
+                    sources = [metadata.get('source', 'Unknown') for metadata in metadatas]
+                else:
+                    self.logger.warning("No metadata found in results")
+                    sources = ["Unknown"] * len(documents)
                 
-                sources = [metadata.get('source', 'Unknown') for metadata in metadatas]
+                for i, doc in enumerate(documents):
+                    self.logger.info(f"Match {i+1}: {doc[:50]}...")
                 
                 return documents, sources
             else:
-                logging.warning("No matching documents found in knowledge base")
+                self.logger.warning("No matching documents found in knowledge base")
+                self.logger.info(f"Results keys: {results.keys() if results else 'None'}")
                 
                 # Fallback: return a representative document anyway
                 try:
                     # Try to get all documents
                     all_ids = self.collection.get(limit=1)
                     if all_ids and 'documents' in all_ids and all_ids['documents']:
-                        logging.info("Using fallback document from knowledge base")
-                        return [all_ids['documents'][0]], [all_ids['metadatas'][0].get('source', 'Unknown')]
+                        self.logger.info("Using fallback document from knowledge base")
+                        
+                        if 'metadatas' in all_ids and all_ids['metadatas']:
+                            source = all_ids['metadatas'][0].get('source', 'Unknown')
+                        else:
+                            source = "Unknown"
+                            
+                        return [all_ids['documents'][0]], [source]
                 except Exception as e:
-                    logging.error(f"Error getting fallback document: {str(e)}")
+                    self.logger.error(f"Error getting fallback document: {str(e)}")
             
             return [], []
         
         except Exception as e:
-            logging.error(f"Error querying knowledge base: {str(e)}")
+            self.logger.error(f"Error querying knowledge base: {str(e)}")
             return [], []
     
     def get_status(self) -> Dict[str, Any]:
@@ -252,7 +258,7 @@ class KnowledgeBase:
             # Get count from collection
             vector_count = self.collection.count()
         except Exception as e:
-            logging.error(f"Error getting vector count: {str(e)}")
+            self.logger.error(f"Error getting vector count: {str(e)}")
             vector_count = 0
         
         return {

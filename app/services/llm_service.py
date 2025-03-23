@@ -7,9 +7,18 @@ from app.services.knowledge_service import KnowledgeBase
 from app.models import ChatMessage
 
 class LLMService:
-    def __init__(self):
+    def __init__(self, knowledge_base: KnowledgeBase):
+        """
+        Initialize LLM Service with a shared Knowledge Base instance.
+        
+        Args:
+            knowledge_base: An instance of KnowledgeBase to use for context retrieval
+        """
         self.base_url = LM_STUDIO_URL
-        self.kb = KnowledgeBase()
+        self.kb = knowledge_base  # Use the provided KB instance instead of creating a new one
+        # Setup logger
+        self.logger = logging.getLogger(__name__)
+        self.logger.info("LLMService initialized with shared knowledge base instance")
     
     def generate_completion(
         self, 
@@ -29,10 +38,15 @@ class LLMService:
         
         # Retrieve context from knowledge base if requested
         if use_knowledge_base:
+            self.logger.info(f"Knowledge base enabled for completion, querying with: '{prompt[:50]}...'")
             contexts, sources = self.kb.query(prompt)
             if contexts:
                 context = "\n\n".join(contexts)
-                logging.info(f"Retrieved {len(contexts)} contexts for completion")
+                self.logger.info(f"Retrieved {len(contexts)} contexts for completion")
+            else:
+                self.logger.warning("Knowledge base query returned no contexts despite being enabled")
+        else:
+            self.logger.info("Knowledge base disabled for completion request")
         
         # Build the prompt with context if available
         enhanced_prompt = prompt
@@ -65,10 +79,10 @@ YOUR ANSWER (using ONLY the provided company information):"""
             if response.status_code == 200:
                 return response.json()["choices"][0]["text"], sources
             else:
-                logging.error(f"Error from LM Studio API: {response.text}")
+                self.logger.error(f"Error from LM Studio API: {response.text}")
                 raise Exception(f"Error calling LM Studio API: {response.text}")
         except Exception as e:
-            logging.error(f"Error generating completion: {str(e)}")
+            self.logger.error(f"Error generating completion: {str(e)}")
             raise
     
     def generate_chat_completion(
@@ -86,22 +100,46 @@ YOUR ANSWER (using ONLY the provided company information):"""
         """
         # Extract the last user message
         last_user_message = next((msg.content for msg in reversed(messages) 
-                           if msg.role == "user"), "")
+                       if msg.role == "user"), "")
+        
+        self.logger.info(f"Chat completion requested with use_knowledge_base={use_knowledge_base}")
+        self.logger.info(f"Last user message: '{last_user_message[:50]}...'")
+        
+        # Check knowledge base status
+        kb_status = self.kb.get_status()
+        self.logger.info(f"Knowledge base status: {kb_status['document_count']} documents, {kb_status['vector_count']} vectors")
         
         context = ""
         sources = []
+        contexts = []
         
-        # Retrieve context from knowledge base if requested
-        if use_knowledge_base and last_user_message:
+        # Only attempt to retrieve from knowledge base if it's enabled AND there are documents
+        if use_knowledge_base and last_user_message and kb_status['vector_count'] > 0:
+            self.logger.info("Knowledge base is enabled and has content, retrieving context...")
+            
+            # Try to get context from knowledge base
             contexts, sources = self.kb.query(last_user_message)
-            if contexts:
+            
+            if contexts and len(contexts) > 0:
+                self.logger.info(f"Successfully retrieved {len(contexts)} contexts")
                 context = "\n\n".join(contexts)
-                logging.info(f"Retrieved {len(contexts)} contexts for query: {last_user_message}")
                 for i, ctx in enumerate(contexts):
-                    logging.info(f"Context {i+1} (first 100 chars): {ctx[:100]}...")
+                    self.logger.info(f"Context {i+1} (first 100 chars): {ctx[:100]}...")
+            else:
+                self.logger.warning("Knowledge base query returned no contexts")
+        else:
+            if not use_knowledge_base:
+                self.logger.info("Knowledge base usage disabled by request parameter")
+            elif not last_user_message:
+                self.logger.warning("No user message to query knowledge base with")
+            elif kb_status['vector_count'] <= 0:
+                self.logger.warning("Knowledge base is empty (no vectors)")
+            else:
+                self.logger.warning("Unknown reason for not using knowledge base")
         
-        # If we have context, use it with a completion approach
+        # If we successfully retrieved context, use the completion approach with knowledge
         if context:
+            self.logger.info("Using context-enhanced completion")
             # Create a direct, forceful prompt
             prompt = f"""You are answering a question about company policies and information.
             
@@ -126,22 +164,22 @@ YOUR ANSWER (using ONLY the provided company information):"""
             }
             
             try:
-                logging.info("Using completions API with knowledge context")
+                self.logger.info("Calling completions API with knowledge context")
                 response = requests.post(url, json=payload)
                 
                 if response.status_code == 200:
                     answer_text = response.json()["choices"][0]["text"]
-                    logging.info(f"Generated answer using knowledge (first 100 chars): {answer_text[:100]}...")
+                    self.logger.info(f"Generated answer with knowledge context (first 100 chars): {answer_text[:100]}...")
                     return answer_text, sources
                 else:
-                    logging.error(f"Error from completions API: {response.text}")
+                    self.logger.error(f"Error from completions API: {response.text}")
                     # Fall through to regular chat if this fails
             except Exception as e:
-                logging.error(f"Error with completion approach: {str(e)}")
+                self.logger.error(f"Error with completion approach: {str(e)}")
                 # Fall through to regular chat if this fails
         
         # Standard chat approach as fallback
-        logging.info("Using standard chat approach (no knowledge context)")
+        self.logger.info("Using standard chat approach (no knowledge context applied)")
         api_messages = [{"role": msg.role, "content": msg.content} for msg in messages]
         url = f"{self.base_url}/chat/completions"
         
@@ -159,8 +197,8 @@ YOUR ANSWER (using ONLY the provided company information):"""
                 answer = response.json()["choices"][0]["message"]["content"]
                 return answer, []
             else:
-                logging.error(f"Error from chat API: {response.text}")
+                self.logger.error(f"Error from chat API: {response.text}")
                 raise Exception(f"Error calling LM Studio API: {response.text}")
         except Exception as e:
-            logging.error(f"Error generating chat completion: {str(e)}")
+            self.logger.error(f"Error generating chat completion: {str(e)}")
             raise
