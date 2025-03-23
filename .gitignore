@@ -36,6 +36,7 @@ ENV/
 
 # Vector database
 data/vectorstore/
+data/
 
 # Large documents
 *.pdf

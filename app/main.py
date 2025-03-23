@@ -13,13 +13,15 @@ from app.models import (
     ChatResponse, 
     ChatMessage,
     DocumentUploadResponse,
-    KnowledgeBaseStatusResponse
+    KnowledgeBaseStatusResponse,
+    WebsiteUploadRequest
 )
 from app.services.llm_service import LLMService
 from app.services.knowledge_service import KnowledgeBase
 from app.utils.document_processor import save_uploaded_file, delete_document, list_documents
 from app.utils.prompt_builder import build_knowledge_prompt, build_regular_chat_prompt
 from app.utils.personas import get_persona
+from app.utils.web_scraper import scrape_website
 from app.config import DOCUMENTS_DIR, LM_STUDIO_URL
 
 # Context size limits to prevent token overflow
@@ -263,6 +265,40 @@ async def upload_document(file: UploadFile = File(...)):
             )
     except Exception as e:
         logging.error(f"Error uploading document: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/knowledge/add-website", response_model=DocumentUploadResponse)
+async def add_website(request: WebsiteUploadRequest):
+    """Add website content to the knowledge base."""
+    try:
+        url = request.url
+        logger.info(f"Scraping website: {url}")
+        file_path = scrape_website(url, DOCUMENTS_DIR)
+        
+        if not file_path:
+            raise HTTPException(status_code=400, detail="Failed to scrape website")
+            
+        # Add to knowledge base
+        filename = os.path.basename(file_path)
+        logger.info(f"Adding scraped content to knowledge base: {filename}")
+        success = kb_service.add_document(file_path)
+        
+        if success:
+            logger.info(f"Website content successfully added: {filename}")
+            return DocumentUploadResponse(
+                status="success",
+                filename=filename,
+                message=f"Website content from {url} added successfully"
+            )
+        else:
+            logger.warning(f"Website content saved but processing failed: {filename}")
+            return DocumentUploadResponse(
+                status="warning",
+                filename=filename,
+                message="Website content saved but could not be processed"
+            )
+    except Exception as e:
+        logging.error(f"Error adding website: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/api/knowledge/documents/{filename}")

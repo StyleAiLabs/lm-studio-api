@@ -32,6 +32,9 @@ class DocumentUploadResponse(BaseModel):
     filename: str
     message: str
 
+class WebsiteUploadRequest(BaseModel):
+    url: str
+    
 class KnowledgeBaseStatusResponse(BaseModel):
     status: str
     document_count: int
