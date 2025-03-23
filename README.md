@@ -6,7 +6,10 @@ A knowledge-enhanced AI API that leverages LM Studio for generating responses ba
 
 The Business AI System uses a layered architecture to provide AI-powered knowledge retrieval and generation services:
 
-![Business AI System Architecture]
+[Business AI System Architecture]
+
+![image](https://github.com/user-attachments/assets/5e26e616-3262-4a52-930e-88954a251190)
+
 
 ### System Components
 
