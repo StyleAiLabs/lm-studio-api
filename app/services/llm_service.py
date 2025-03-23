@@ -5,6 +5,8 @@ from typing import List, Dict, Any, Optional, Tuple
 from app.config import LM_STUDIO_URL
 from app.services.knowledge_service import KnowledgeBase
 from app.models import ChatMessage
+from app.utils.prompt_builder import build_knowledge_prompt, build_regular_chat_prompt
+from app.utils.personas import get_persona  # Updated import path
 
 class LLMService:
     def __init__(self, knowledge_base: KnowledgeBase):
@@ -25,7 +27,8 @@ class LLMService:
         prompt: str, 
         max_tokens: int = 200, 
         temperature: float = 0.7,
-        use_knowledge_base: bool = True
+        use_knowledge_base: bool = True,
+        persona: str = "default"
     ) -> Tuple[str, Optional[List[str]]]:
         """
         Generate text completion with optional knowledge base context.
@@ -35,6 +38,10 @@ class LLMService:
         """
         context = ""
         sources = []
+        
+        # Get persona configuration
+        persona_config = get_persona(persona)
+        persona_temp = persona_config.get("temperature", temperature)
         
         # Retrieve context from knowledge base if requested
         if use_knowledge_base:
@@ -51,17 +58,9 @@ class LLMService:
         # Build the prompt with context if available
         enhanced_prompt = prompt
         if context:
-            enhanced_prompt = f"""You are answering a question about company policies and information.
-            
-IMPORTANT: You MUST ONLY use the information provided below to answer the question.
-If the information doesn't contain the answer, say "I don't have that specific information in my knowledge base."
-
-COMPANY INFORMATION:
-{context}
-
-QUESTION: {prompt}
-
-YOUR ANSWER (using ONLY the provided company information):"""
+            # Use the prompt builder with persona and few-shot examples
+            enhanced_prompt = build_knowledge_prompt(context, prompt, persona)
+            self.logger.info(f"Using persona '{persona}' for knowledge-enhanced prompt")
         
         # Call LM Studio API
         url = f"{self.base_url}/completions"
@@ -69,7 +68,7 @@ YOUR ANSWER (using ONLY the provided company information):"""
         payload = {
             "prompt": enhanced_prompt,
             "max_tokens": max_tokens,
-            "temperature": temperature,
+            "temperature": persona_temp,
             "stream": False
         }
         
@@ -90,7 +89,8 @@ YOUR ANSWER (using ONLY the provided company information):"""
         messages: List[ChatMessage], 
         max_tokens: int = 200, 
         temperature: float = 0.7,
-        use_knowledge_base: bool = True
+        use_knowledge_base: bool = True,
+        persona: str = "default"
     ) -> Tuple[str, Optional[List[str]]]:
         """
         Generate chat completion with knowledge base context.
@@ -102,8 +102,12 @@ YOUR ANSWER (using ONLY the provided company information):"""
         last_user_message = next((msg.content for msg in reversed(messages) 
                        if msg.role == "user"), "")
         
-        self.logger.info(f"Chat completion requested with use_knowledge_base={use_knowledge_base}")
+        self.logger.info(f"Chat completion requested with use_knowledge_base={use_knowledge_base}, persona={persona}")
         self.logger.info(f"Last user message: '{last_user_message[:50]}...'")
+        
+        # Get persona configuration
+        persona_config = get_persona(persona)
+        persona_temp = persona_config.get("temperature", temperature)
         
         # Check knowledge base status
         kb_status = self.kb.get_status()
@@ -139,19 +143,10 @@ YOUR ANSWER (using ONLY the provided company information):"""
         
         # If we successfully retrieved context, use the completion approach with knowledge
         if context:
-            self.logger.info("Using context-enhanced completion")
-            # Create a direct, forceful prompt
-            prompt = f"""You are answering a question about company policies and information.
+            self.logger.info(f"Using context-enhanced completion with persona '{persona}'")
             
-IMPORTANT: You MUST ONLY use the information provided below to answer the question.
-If the information doesn't contain the answer, say "I don't have that specific information in my knowledge base."
-
-COMPANY INFORMATION:
-{context}
-
-QUESTION: {last_user_message}
-
-YOUR ANSWER (using ONLY the provided company information):"""
+            # Use the prompt builder for knowledge-enhanced prompts with persona and examples
+            prompt = build_knowledge_prompt(context, last_user_message, persona)
             
             # Use completions API for a more direct approach
             url = f"{self.base_url}/completions"
@@ -159,7 +154,7 @@ YOUR ANSWER (using ONLY the provided company information):"""
             payload = {
                 "prompt": prompt,
                 "max_tokens": max_tokens,
-                "temperature": 0.3,  # Lower temperature for more deterministic responses
+                "temperature": persona_temp,
                 "stream": False
             }
             
@@ -179,14 +174,20 @@ YOUR ANSWER (using ONLY the provided company information):"""
                 # Fall through to regular chat if this fails
         
         # Standard chat approach as fallback
-        self.logger.info("Using standard chat approach (no knowledge context applied)")
+        self.logger.info(f"Using standard chat approach with persona '{persona}'")
+        
+        # Convert our messages to the format expected by the API
         api_messages = [{"role": msg.role, "content": msg.content} for msg in messages]
+        
+        # Use the prompt builder to enhance messages with persona system message
+        enhanced_messages = build_regular_chat_prompt(api_messages, persona)
+        
         url = f"{self.base_url}/chat/completions"
         
         payload = {
-            "messages": api_messages,
+            "messages": enhanced_messages,
             "max_tokens": max_tokens, 
-            "temperature": temperature,
+            "temperature": persona_temp,
             "stream": False
         }
         

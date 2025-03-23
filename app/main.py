@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse
 import logging
 import os
 from typing import List, Optional
+import requests
 
 from app.models import (
     CompletionRequest, 
@@ -17,7 +18,35 @@ from app.models import (
 from app.services.llm_service import LLMService
 from app.services.knowledge_service import KnowledgeBase
 from app.utils.document_processor import save_uploaded_file, delete_document, list_documents
+from app.utils.prompt_builder import build_knowledge_prompt, build_regular_chat_prompt
+from app.utils.personas import get_persona
 from app.config import DOCUMENTS_DIR, LM_STUDIO_URL
+
+# Context size limits to prevent token overflow
+MAX_CONTEXT_CHARS = 2000  # Approximately 500 tokens
+ESTIMATED_CHARS_PER_TOKEN = 4  # Rough estimate
+
+def truncate_contexts(contexts, max_total_chars=MAX_CONTEXT_CHARS):
+    """Limit total context size to fit within token limits"""
+    result = []
+    total_chars = 0
+    
+    for ctx in contexts:
+        # If adding this context would exceed our limit
+        if total_chars + len(ctx) > max_total_chars:
+            # If we have no contexts yet, add a truncated version of this one
+            if not result:
+                truncated = ctx[:max_total_chars]
+                result.append(truncated)
+                logging.info(f"Truncated single context to {len(truncated)} chars")
+            break
+        
+        # Otherwise add the full context
+        result.append(ctx)
+        total_chars += len(ctx)
+        
+    logging.info(f"Reduced contexts from {len(contexts)} to {len(result)} to fit token limit")
+    return result
 
 # Configure logging
 logging.basicConfig(
@@ -62,7 +91,8 @@ async def create_completion(request: CompletionRequest):
             request.prompt,
             max_tokens=request.max_tokens,
             temperature=request.temperature,
-            use_knowledge_base=request.use_knowledge_base
+            use_knowledge_base=request.use_knowledge_base,
+            persona=request.persona if hasattr(request, 'persona') else "default"
         )
         
         # Format source document paths for display
@@ -84,7 +114,10 @@ async def create_chat_completion(request: ChatRequest):
         last_user_message = next((msg.content for msg in reversed(request.messages) 
                        if msg.role == "user"), "")
         
-        logging.info(f"Chat request received with use_knowledge_base={request.use_knowledge_base}")
+        # Get persona if available (default to "default" if not specified)
+        persona = getattr(request, 'persona', "default")
+        
+        logging.info(f"Chat request received with use_knowledge_base={request.use_knowledge_base}, persona={persona}")
         logging.info(f"Last user message: '{last_user_message[:50]}...'")
         
         sources = []
@@ -106,35 +139,44 @@ async def create_chat_completion(request: ChatRequest):
                         if i < len(sources):
                             logging.info(f"Source: {sources[i]}")
                     
+                    # Apply context truncation to prevent token overflow
+                    limited_contexts = truncate_contexts(contexts)
+                    
                     # If we have contexts, use enhanced completion
-                    context_text = "\n\n".join(contexts)
+                    context_text = "\n\n".join(limited_contexts)
+                    logging.info(f"Total context size: {len(context_text)} characters")
                     
-                    # Create knowledge-enhanced prompt
-                    prompt = f"""You are answering a question about company policies and information.
+                    # Get persona configuration
+                    persona_config = get_persona(persona)
+                    persona_temp = persona_config.get("temperature", 0.7)
                     
-IMPORTANT: You MUST ONLY use the information provided below to answer the question.
-If the information doesn't contain the answer, say "I don't have that specific information in my knowledge base."
-
-COMPANY INFORMATION:
-{context_text}
-
-QUESTION: {last_user_message}
-
-YOUR ANSWER (using ONLY the provided company information):"""
+                    # Create knowledge-enhanced prompt with prompt builder
+                    prompt = build_knowledge_prompt(context_text, last_user_message, persona)
+                    
+                    # Log token estimate (rough approximation)
+                    estimated_tokens = len(prompt) / ESTIMATED_CHARS_PER_TOKEN
+                    logging.info(f"Estimated prompt tokens: {estimated_tokens}")
                     
                     # Call completion API directly
                     url = f"{LM_STUDIO_URL}/completions"
                     payload = {
                         "prompt": prompt,
                         "max_tokens": request.max_tokens,
-                        "temperature": 0.3,
+                        "temperature": persona_temp,
                         "stream": False
                     }
                     
-                    import requests
+                    logging.info(f"Calling LM Studio API at {url}")
                     response = requests.post(url, json=payload)
                     
+                    logging.info(f"LM Studio API response status: {response.status_code}")
+                    if response.status_code != 200:
+                        logging.error(f"LM Studio API error: {response.text}")
+                    
                     if response.status_code == 200:
+                        # Log the entire response structure to debug
+                        logging.info(f"Response JSON keys: {list(response.json().keys())}")
+                        
                         answer_text = response.json()["choices"][0]["text"]
                         logging.info(f"Generated answer: {answer_text[:100]}...")
                         
@@ -150,21 +192,31 @@ YOUR ANSWER (using ONLY the provided company information):"""
                         
             except Exception as e:
                 logging.error(f"Error with direct KB access: {str(e)}")
+                logging.exception("Details:")
         
         # If we get here, either knowledge base is disabled or we didn't find matches
         # Fall back to regular chat API
-        logging.info("Falling back to standard chat API (no knowledge context)")
+        logging.info(f"Falling back to standard chat API with persona '{persona}'")
+        
+        # Convert ChatMessage objects to dicts for the API
         api_messages = [{"role": msg.role, "content": msg.content} for msg in request.messages]
+        
+        # Use the prompt builder to enhance with persona
+        enhanced_messages = build_regular_chat_prompt(api_messages, persona)
+        
         url = f"{LM_STUDIO_URL}/chat/completions"
         
+        # Get persona temperature
+        persona_config = get_persona(persona)
+        persona_temp = persona_config.get("temperature", request.temperature)
+        
         payload = {
-            "messages": api_messages,
+            "messages": enhanced_messages,
             "max_tokens": request.max_tokens,
-            "temperature": request.temperature,
+            "temperature": persona_temp,
             "stream": False
         }
         
-        import requests
         response = requests.post(url, json=payload)
         
         if response.status_code == 200:

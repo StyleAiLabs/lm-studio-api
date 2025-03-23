@@ -6,6 +6,7 @@ class CompletionRequest(BaseModel):
     max_tokens: Optional[int] = 200
     temperature: Optional[float] = 0.7
     use_knowledge_base: Optional[bool] = True
+    persona: Optional[str] = "default"  # Added persona field
     
 class CompletionResponse(BaseModel):
     text: str
@@ -20,6 +21,7 @@ class ChatRequest(BaseModel):
     max_tokens: Optional[int] = 200
     temperature: Optional[float] = 0.7
     use_knowledge_base: Optional[bool] = True
+    persona: Optional[str] = "default"  # Added persona field
     
 class ChatResponse(BaseModel):
     message: ChatMessage
