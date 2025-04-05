@@ -82,6 +82,11 @@ cp .env.example .env
 uvicorn app.main:app --reload
 ```
 
+5. Access the API Docs
+```
+http://localhost:8000/docs#/
+```
+
 ## API Usage
 
 ### Chat Endpoint
