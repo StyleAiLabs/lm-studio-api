@@ -1,13 +1,18 @@
 fastapi==0.104.1
 uvicorn==0.23.2
+starlette==0.27.0  # Explicit pin to match fastapi testclient expectations
 requests==2.31.0
 python-dotenv==1.0.0
 langchain==0.0.292
 langchain-community==0.0.8
 chromadb==0.4.18
 sentence-transformers==2.2.2
+huggingface_hub==0.16.4  # Compatible with sentence-transformers 2.2.2
+transformers==4.33.3     # Needed indirectly by sentence-transformers; pinned for stability
 pandas==2.1.0
 pypdf==3.16.2
 docx2txt==0.8
 pydantic==2.4.2
 beautifulsoup4>=4.11.0
+python-multipart==0.0.20 # Required for file uploads (FastAPI form handling)
+httpx==0.24.1            # Needed for FastAPI TestClient

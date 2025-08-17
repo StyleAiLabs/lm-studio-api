@@ -87,7 +87,51 @@ uvicorn app.main:app --reload
 http://localhost:8000/docs#/
 ```
 
+## Documentation
+- [Multi-Tenancy & Offline Modes Feature](docs/FEATURE-multi-tenancy-and-offline-modes.md)
+
 ## API Usage
+
+### Multi-Tenancy (Company Isolation)
+
+The API supports multiple companies (tenants). Each tenant has completely isolated:
+* Document directory: `data/documents/<tenant_id>`
+* Vector store: `data/vectorstore/<tenant_id>` (separate Chroma persistence path)
+* Chroma collection name: `business_knowledge_<tenant_id>`
+
+How to specify tenant:
+1. Preferred: HTTP header `X-Tenant-Id: acme` on any request
+2. Request body field `tenant_id` (for JSON endpoints like `/api/chat`, `/api/completion`)
+3. Multipart form field `tenant_id` for uploads
+4. Query param `tenant_id` for status / rebuild / delete endpoints
+
+If no tenant is provided the system uses the `default` tenant.
+
+Migration: On first startup after enabling multi-tenancy existing flat files in `data/documents` and the root vector store in `data/vectorstore` are automatically moved under `default/`. A marker file `.multitenant_migrated` prevents repeated moves.
+
+Example chat with tenant header:
+```
+curl -X POST http://localhost:8000/api/chat \
+  -H 'Content-Type: application/json' \
+  -H 'X-Tenant-Id: acme' \
+  -d '{
+        "messages":[{"role":"user","content":"Summarize our safety cabinet standards"}],
+        "use_knowledge_base": true,
+        "persona": "professional"
+      }'
+```
+
+Upload a document for tenant:
+```
+curl -X POST http://localhost:8000/api/knowledge/upload \
+  -H 'X-Tenant-Id: acme' \
+  -F 'file=@/path/to/file.pdf'
+```
+
+Get status for specific tenant:
+```
+curl 'http://localhost:8000/api/knowledge/status?tenant_id=acme'
+```
 
 ### Chat Endpoint
 ```

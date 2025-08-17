@@ -2,55 +2,171 @@ import os
 import logging
 import shutil
 from typing import List, Dict, Any, Optional, Tuple
-from sentence_transformers import SentenceTransformer
+from pathlib import Path
+# from sentence_transformers import SentenceTransformer  # Removed to avoid heavy import at startup
 import chromadb
-from chromadb.utils import embedding_functions
+# Lazy import of embedding_functions only when needed to avoid heavy deps during FAST_START
+embedding_functions = None
 import pypdf
 import docx2txt
+import hashlib
+import math
+
+# Optional fast-start mode to skip heavy model download (set FAST_START=1)
+FAST_START = os.getenv("FAST_START", "0") == "1"
 
 from app.config import DOCUMENTS_DIR, VECTORSTORE_DIR, CHUNK_SIZE, CHUNK_OVERLAP, EMBEDDING_MODEL
 from app.utils.document_processor import list_documents
 
+# Cache for tenant-specific knowledge bases
+_kb_cache: Dict[str, "KnowledgeBase"] = {}
+
+MIGRATION_FLAG_FILE = ".multitenant_migrated"
+
+def _ensure_default_migration():
+    """One-time migration: move flat documents/vectorstore into default/ subdirectories if not yet migrated."""
+    root_docs = Path(DOCUMENTS_DIR)
+    root_vec = Path(VECTORSTORE_DIR)
+    flag_path = root_docs / MIGRATION_FLAG_FILE
+
+    try:
+        if flag_path.exists():
+            return
+        # Determine if migration needed: any files directly under documents (excluding directories & flag)
+        direct_files = [p for p in root_docs.glob("*") if p.is_file() and p.name != MIGRATION_FLAG_FILE]
+        if not direct_files and any(root_docs.iterdir()):
+            # Already structured or empty
+            flag_path.write_text("already structured")
+            return
+
+        default_docs = root_docs / "default"
+        default_docs.mkdir(parents=True, exist_ok=True)
+        for f in direct_files:
+            shutil.move(str(f), str(default_docs / f.name))
+
+        # Vectorstore migration: move existing contents into vectorstore/default if not already
+        default_vec = root_vec / "default"
+        default_vec.mkdir(parents=True, exist_ok=True)
+        # If chroma.sqlite3 exists at root and default is empty, move it
+        root_sqlite = root_vec / "chroma.sqlite3"
+        if root_sqlite.exists() and not any(default_vec.iterdir()):
+            shutil.move(str(root_sqlite), str(default_vec / root_sqlite.name))
+        # Move uuid dirs
+        for item in root_vec.glob("*"):
+            if item.is_dir() and item.name != "default":
+                target = default_vec / item.name
+                if not target.exists():
+                    shutil.move(str(item), str(target))
+        flag_path.write_text("migrated")
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Migration error: {e}")
+
+_ensure_default_migration()
+
 class KnowledgeBase:
-    def __init__(self, 
-                 documents_dir: str = DOCUMENTS_DIR,
-                 vectorstore_dir: str = VECTORSTORE_DIR,
+    def __init__(self,
+                 tenant_id: str = "default",
+                 base_documents_dir: str = DOCUMENTS_DIR,
+                 base_vectorstore_dir: str = VECTORSTORE_DIR,
                  embedding_model: str = EMBEDDING_MODEL,
                  chunk_size: int = CHUNK_SIZE,
                  chunk_overlap: int = CHUNK_OVERLAP):
-        
-        self.documents_dir = documents_dir
-        self.vectorstore_dir = vectorstore_dir
+        self.tenant_id = tenant_id or "default"
+        self.documents_dir = os.path.join(base_documents_dir, self.tenant_id)
+        self.vectorstore_dir = os.path.join(base_vectorstore_dir, self.tenant_id)
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
-        
+
         # Configure logging
         self.logger = logging.getLogger(__name__)
-        
-        # Create directories if they don't exist
+        self.logger.info(f"Initializing KnowledgeBase for tenant '{self.tenant_id}'")
+
+        # Create directories
         os.makedirs(self.documents_dir, exist_ok=True)
         os.makedirs(self.vectorstore_dir, exist_ok=True)
-        
-        # Set up embeddings and chroma client
-        self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=embedding_model
-        )
-        
-        self.client = chromadb.PersistentClient(path=self.vectorstore_dir)
-        
-        # Create or get collection
+
+        # Embeddings & client (with fallback hash embedding for fast start or import issues)
+        self.embedding_function = None
+        if FAST_START:
+            self.logger.warning("FAST_START enabled: using lightweight hash embedding function (not semantic)")
         try:
-            self.collection = self.client.get_collection(
-                name="business_knowledge",
-                embedding_function=self.embedding_function
+            if not FAST_START:
+                global embedding_functions
+                if embedding_functions is None:
+                    from chromadb.utils import embedding_functions as ef  # type: ignore
+                    embedding_functions = ef
+                self.embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
+                    model_name=embedding_model
+                )
+        except Exception as e:
+            self.logger.error(f"Failed loading sentence transformer model '{embedding_model}': {e}. Falling back to hash embeddings.")
+
+        if self.embedding_function is None:
+            # Define simple deterministic hash embedding of fixed dim 384
+            dim = 384
+
+            def _hash_embed(texts):
+                vectors = []
+                for t in texts:
+                    h = hashlib.sha256(t.encode('utf-8')).digest()
+                    nums = []
+                    while len(nums) < dim:
+                        for b in h:
+                            nums.append((b / 255.0) * 2 - 1)
+                            if len(nums) >= dim:
+                                break
+                    norm = math.sqrt(sum(x * x for x in nums)) or 1.0
+                    vectors.append([x / norm for x in nums])
+                return vectors
+
+            class HashEmbeddingFunction:
+                """Lightweight Chroma embedding function fallback.
+
+                Conforms to interface: __call__(self, input: List[str]) -> List[List[float]]
+                """
+                def __call__(self, input):  # Chroma expects parameter name 'input'
+                    return _hash_embed(input)
+
+            self.embedding_function = HashEmbeddingFunction()
+            self.logger.warning(
+                "Using non-semantic hash embeddings; enable real model by unsetting FAST_START and ensuring model download works."
             )
-            self.logger.info(f"Loaded existing collection with {self.collection.count()} documents")
-        except ValueError:
-            self.collection = self.client.create_collection(
-                name="business_knowledge",
-                embedding_function=self.embedding_function
+        self.client = chromadb.PersistentClient(path=self.vectorstore_dir)
+
+        self.collection_name = f"business_knowledge_{self.tenant_id}"
+        self.collection = None
+        self._ensure_collection()
+
+    def _ensure_collection(self):
+        """Idempotently get or create the Chroma collection."""
+        if self.collection is not None:
+            return
+        try:
+            # Preferred helper if available
+            if hasattr(self.client, 'get_or_create_collection'):
+                self.collection = self.client.get_or_create_collection(
+                    name=self.collection_name,
+                    embedding_function=self.embedding_function,
+                    metadata={"tenant": self.tenant_id}
+                )
+            else:
+                try:
+                    self.collection = self.client.get_collection(
+                        name=self.collection_name,
+                        embedding_function=self.embedding_function
+                    )
+                except ValueError:
+                    self.collection = self.client.create_collection(
+                        name=self.collection_name,
+                        embedding_function=self.embedding_function,
+                        metadata={"tenant": self.tenant_id}
+                    )
+            self.logger.info(
+                f"Collection ready '{self.collection_name}' (count={self.collection.count()})"
             )
-            self.logger.info("Created new collection")
+        except Exception as e:
+            self.logger.error(f"Failed to ensure collection {self.collection_name}: {e}")
+            raise
     
     def _extract_text_from_file(self, file_path: str) -> Optional[str]:
         """Extract text from various file types."""
@@ -165,15 +281,17 @@ class KnowledgeBase:
         """Rebuild the entire knowledge base from documents."""
         try:
             # Reset collection
+            # Delete then recreate collection
             try:
-                self.client.delete_collection("business_knowledge")
-                self.logger.info("Deleted existing collection")
+                self.client.delete_collection(self.collection_name)
+                self.logger.info(f"Deleted existing collection {self.collection_name}")
             except ValueError:
-                self.logger.info("No existing collection to delete")
-                
+                self.logger.info("No existing collection to delete for rebuild")
+
             self.collection = self.client.create_collection(
-                name="business_knowledge",
-                embedding_function=self.embedding_function
+                name=self.collection_name,
+                embedding_function=self.embedding_function,
+                metadata={"tenant": self.tenant_id}
             )
             
             # Add all documents
@@ -203,6 +321,7 @@ class KnowledgeBase:
         try:
             # Try to ensure we get results - REMOVING include_distances
             self.logger.info(f"Querying knowledge base with: '{query_text}'")
+            self._ensure_collection()
             results = self.collection.query(
                 query_texts=[query_text],
                 n_results=k
@@ -255,7 +374,7 @@ class KnowledgeBase:
         document_count = len(list_documents(self.documents_dir))
         
         try:
-            # Get count from collection
+            self._ensure_collection()
             vector_count = self.collection.count()
         except Exception as e:
             self.logger.error(f"Error getting vector count: {str(e)}")
@@ -266,3 +385,10 @@ class KnowledgeBase:
             "vector_count": vector_count,
             "documents": list_documents(self.documents_dir)
         }
+
+def get_knowledge_base(tenant_id: Optional[str]) -> KnowledgeBase:
+    """Get or create a cached knowledge base for a tenant."""
+    tid = tenant_id or "default"
+    if tid not in _kb_cache:
+        _kb_cache[tid] = KnowledgeBase(tenant_id=tid)
+    return _kb_cache[tid]

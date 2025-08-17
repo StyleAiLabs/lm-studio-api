@@ -7,6 +7,7 @@ class CompletionRequest(BaseModel):
     temperature: Optional[float] = 0.7
     use_knowledge_base: Optional[bool] = True
     persona: Optional[str] = "default"  # Added persona field
+    tenant_id: Optional[str] = None  # Multi-tenant support
     
 class CompletionResponse(BaseModel):
     text: str
@@ -22,6 +23,7 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = 0.7
     use_knowledge_base: Optional[bool] = True
     persona: Optional[str] = "default"  # Added persona field
+    tenant_id: Optional[str] = None  # Multi-tenant support
     
 class ChatResponse(BaseModel):
     message: ChatMessage
@@ -31,12 +33,15 @@ class DocumentUploadResponse(BaseModel):
     status: str
     filename: str
     message: str
+    tenant_id: Optional[str] = None
 
 class WebsiteUploadRequest(BaseModel):
     url: str
+    tenant_id: Optional[str] = None
     
 class KnowledgeBaseStatusResponse(BaseModel):
     status: str
     document_count: int
     vector_count: int
     documents: List[str]
+    tenant_id: Optional[str] = None
