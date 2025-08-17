@@ -1,69 +1,58 @@
 # AI Coding Agent Instructions
 
-Concise, project-specific guidance for autonomous coding agents working on this repository.
+Concise, actionable guidance for working productively in this repo. Keep edits minimal, tenant-safe, and prompt-efficient.
 
-## 1. Architecture Overview
-- FastAPI app (`app/main.py`) exposes endpoints for completions, chat, document mgmt, knowledge base ops, health/debug.
-- Service layer:
-  - `LLMService` (`app/services/llm_service.py`): orchestrates persona selection, knowledge retrieval, builds prompts, calls LM Studio REST (`/completions`, `/chat/completions`). Chooses completions API when KB context present; falls back to chat API.
-  - `KnowledgeBase` (`app/services/knowledge_service.py`): manages documents (txt/pdf/docx), chunking, embeddings (SentenceTransformer via Chroma), semantic query, rebuild.
-- Utilities: prompt construction (`app/utils/prompt_builder.py`), personas (`app/utils/personas.py`), document file ops (`app/utils/document_processor.py`), (web scraping util present but not yet referenced in main endpoints excerpt).
-- Data layer: documents and persistent Chroma DB under `data/documents` and `data/vectorstore` (configurable via env).
-- Models (`app/models.py`): Pydantic schemas defining request/response contracts.
+## Core Architecture
+- FastAPI entrypoint: `app/main.py` (routes for completion, chat, knowledge ops, website ingest, debug, health).
+- Services: `LLMService` (prompt assembly + LM Studio REST) and `KnowledgeBase` (document IO, chunking, Chroma vector search) in `app/services/`.
+- Utilities: personas (`personas.py`), prompt builder (`prompt_builder.py`), document helpers (`document_processor.py`), web crawler (`web_scraper.py`).
+- Data layout (multi-tenant): `data/documents/<tenant>/` & `data/vectorstore/<tenant>/` with Chroma collection name `business_knowledge_<tenant>`.
 
-## 2. Configuration & Environment
-- Environment loaded in `app/config.py` via `python-dotenv`.
-- Key vars: `LM_STUDIO_URL` (default `http://localhost:1234/v1`), `DOCUMENTS_DIR`, `VECTORSTORE_DIR`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `EMBEDDING_MODEL`.
-- Adjust by editing `.env`; restart server to apply.
+## Multi-Tenancy Rules
+- Tenant resolution precedence: body/form `tenant_id` > query `tenant_id` > header `X-Tenant-Id` > fallback `default`.
+- Migration marker `.multitenant_migrated` prevents re-moving legacy single-tenant data (already handled automatically).
+- Never mix tenant data paths; always derive paths via `KnowledgeBase` factory (cached per tenant).
 
-## 3. Personas & Prompt Strategy
-- Personas stored in `app/utils/personas.py` with `temperature` and `traits` list. Retrieve via `get_persona()`.
-- Prompt builder injects system guardrails (_no chain-of-thought_, missing data handling) in `prompt_builder.py`.
-- Knowledge queries: build a single concatenated prompt (`build_knowledge_prompt`) embedding context + question + persona traits (first 3 only for token efficiency).
-- Regular chat: system message prepended (`build_regular_chat_prompt`).
+## Operational Modes
+- `OFFLINE_MODE=1`: Skip LM Studio calls; deterministic stub text (stable tests).
+- `FAST_START=1`: Use cheap hash embeddings (no SentenceTransformer download) — rebuild later after disabling for real embeddings.
+- Combine both for fastest local iteration; unset for production.
 
-## 4. Knowledge Base Mechanics
-- Documents ingested via endpoints -> saved to disk -> `KnowledgeBase.add_document()` extracts text (txt/pdf/docx), paragraph-based chunking with overlap, added to Chroma collection `business_knowledge`.
-- Query path: `KnowledgeBase.query()` -> Chroma `query()` n_results=3 -> returns (documents, sources). Fallback returns one doc if empty.
-- Rebuild: deletes collection, reprocesses all files currently in documents dir.
+## Prompt & Persona Strategy
+- System guardrails + persona traits (first 3 traits only) prepended once (see `prompt_builder.py`). Do NOT add duplicate system messages.
+- Use `/completions` path when KB context exists; fallback to `/chat/completions` otherwise (handled in `LLMService`).
+- Persona temperature overrides user-provided temperature if defined.
+- Never surface chain-of-thought; keep answers concise & factual from supplied context.
 
-## 5. LLM Call Flow
-1. API endpoint receives request (persona, KB flag, etc.).
-2. If KB enabled & context retrieved: construct enhanced prompt and call `.../completions` (single-shot style) to reduce message overhead.
-3. If no context or failure: use chat API with injected system message.
-4. Persona temperature overrides user-provided temperature when set.
+## Knowledge Base Mechanics
+- Ingestion: upload/document or website -> file saved -> text extracted -> paragraphs chunked with overlap -> embedded into Chroma.
+- Query returns top 3 docs (fallback 1) and may return duplicate filenames; consider de-dup if adjusting response shape.
+- Rebuild endpoint wipes & reprocesses tenant docs (use after toggling FAST_START off).
 
-## 6. Testing & Manual Verification
-- Minimal test script: `tests/test_kb.py` (runs live HTTP calls against running server on `localhost:8000`). No unit test harness; treat as integration smoke test.
-- Start server: `uvicorn app.main:app --reload` (ensure LM Studio running on configured port first).
-- Common manual checks:
-  - `/health` returns base URL.
-  - Upload a file then `/api/knowledge/status` shows document count increase.
-  - `/debug/knowledge?query=...` prints retrieved contexts.
+## Website Crawler (`web_scraper.py`)
+- Depth=1 same-domain crawl, size caps: per page ~120KB, total ~250KB; duplicate pages skipped via normalized DOM hash.
+- Boilerplate stripped; final aggregated file includes metadata header + page delimiters.
+- Forbidden (403) raises `WebsiteScrapeForbidden` -> endpoint returns 400; preserve this behavior if modifying.
 
-## 7. Coding Conventions & Patterns
-- Logging: use `logging.getLogger(__name__)` in services; prefer informative context slices (e.g., first 50/100 chars).
-- Keep prompts token-efficient (truncate contexts to ~2000 chars).
-- Chain-of-thought suppression: NEVER output model reasoning in responses; prompt builder enforces this.
-- Error handling: Services raise exceptions upward; endpoints (currently partially stubbed) should wrap and return HTTP errors with clear messages.
-- When extending endpoints, reuse existing service interfaces; avoid duplicating query / prompt logic in the route handlers.
+## Testing Workflow
+- Integration tests: `tests/test_endpoints.py`, `tests/test_kb.py` (use `pytest`). Set `OFFLINE_MODE=1 FAST_START=1` for deterministic runs.
+- Avoid starting uvicorn inside tests; they use FastAPI `TestClient` directly.
+- When adding features: add minimal happy-path + one edge case test (offline stub OK).
 
-## 8. Extending the System
-- Add new persona: update `personas.py` (include temperature) and prompts will auto-use it.
-- Support new file type: extend `_extract_text_from_file` in `KnowledgeBase` and add extension to `document_processor.list_documents`.
-- Swap embedding model: change `EMBEDDING_MODEL` env var (ensure model is valid HuggingFace SentenceTransformer).
-- Add source attribution in chat path: currently only knowledge-enhanced completion path returns sources; adapt fallback chat response similarly if required.
+## Extending Functionality
+- New file type: extend `_extract_text_from_file` (in `knowledge_service.py`) & allow listing in `document_processor`.
+- New persona: append entry in `personas.py`; traits auto-injected.
+- Adjustable crawl params: add optional query/body fields and thread through to `crawl_website` (respect size guardrails).
 
-## 9. Gotchas & Tips
-- Empty KB: queries silently fall back to returning a doc; handle with status vectors count check if precision needed.
-- Large documents: paragraph chunking may produce uneven sizes; consider refining chunker if quality issues arise.
-- Persona temperature: override may surprise users—document this in client UI.
-- Avoid leaking internal reasoning: if model starts emitting it, strengthen `_build_system_instructions` or post-process.
+## Logging & Error Patterns
+- Use `logging.getLogger(__name__)`; log only short context slices (e.g., first 80 chars) to avoid leaking sensitive text.
+- Raise domain-specific exceptions (e.g., `WebsiteScrapeForbidden`) and convert to HTTP errors in route handlers.
 
-## 10. Safe Modification Checklist
-Before committing changes:
-- Run server & smoke test endpoints (upload, chat with KB on/off).
-- Verify Chroma path and collection count unaffected unless intended.
-- Ensure new prompts keep guardrails (system instructions included once).
+## Safe Change Checklist
+1. Run tests (optionally with OFFLINE/FAST). 2. For KB-impacting changes, ingest a sample doc & verify `/api/knowledge/status`. 3. Confirm no duplicate system instructions in responses. 4. Maintain tenant isolation (no cross-tenant path usage). 5. Keep prompt size lean (< ~2000 chars context slice logic already trims—preserve trimming).
 
-Provide feedback if additional workflows (CI, Dockerization, auth) are added later so this file can evolve.
+## Quick Commands (reference)
+Dev (fast): `OFFLINE_MODE=1 FAST_START=1 uvicorn app.main:app --reload`
+Prod-like: `unset OFFLINE_MODE FAST_START && uvicorn app.main:app --host 0.0.0.0 --port 8000`
+
+Keep this file concise; document only proven patterns. Update if adding major capabilities (auth, deeper crawl depth, new LLM providers).
