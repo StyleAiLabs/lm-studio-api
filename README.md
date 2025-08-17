@@ -89,6 +89,7 @@ http://localhost:8000/docs#/
 
 ## Documentation
 - [Multi-Tenancy & Offline Modes Feature](docs/FEATURE-multi-tenancy-and-offline-modes.md)
+- [API Usage & Samples](docs/API-usage-examples.md)
 
 ## API Usage
 
